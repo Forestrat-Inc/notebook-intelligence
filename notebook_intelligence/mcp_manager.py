@@ -74,8 +74,12 @@ class MCPTool(Tool):
             if key in tool_args:
                 call_args[key] = tool_args.get(key)
 
+        log.debug(f"Calling MCP tool '{self.name}' on server '{self._server.name}' with args: {call_args}")
+
         try:
             result = await self._server.call_tool(self.name, call_args)
+            log.debug(f"MCP tool '{self.name}' returned result type: {type(result)}")
+            
             if type(result) is CallToolResult:
                 if len(result.content) > 0:
                     text_contents = []
@@ -86,14 +90,22 @@ class MCPTool(Tool):
                             text_contents.append(content.text)
 
                     if len(text_contents) > 0:
+                        log.debug(f"MCP tool '{self.name}' returned {len(text_contents)} text content(s)")
                         return "\n".join(text_contents)
                     else:
+                        log.debug(f"MCP tool '{self.name}' completed successfully with no text content")
                         return "success"
             elif type(result) is dict:
+                log.debug(f"MCP tool '{self.name}' returned dict result: {result}")
                 return result
             else:
-                return f"Error! Invalid tool result: {result}"
+                error_msg = f"Invalid tool result type from '{self.name}' on server '{self._server.name}': {type(result)} - {result}"
+                log.error(error_msg)
+                return f"Error! {error_msg}"
         except Exception as e:
+            error_msg = f"Exception while calling MCP tool '{self.name}' on server '{self._server.name}' with args {call_args}: {str(e)}"
+            log.error(error_msg)
+            log.debug(f"Full exception details for tool '{self.name}': {repr(e)}")
             return f"Error occurred while calling MCP tool: {str(e)}"
 
 @dataclass
@@ -117,24 +129,48 @@ class MCPServerImpl(MCPServer):
     
     async def connect(self):
         if self._session is not None:
+            log.debug(f"MCP server '{self.name}' already connected")
             return
+        
+        log.info(f"Connecting to MCP server '{self.name}'...")
         self.exit_stack = AsyncExitStack()
 
         try:
             if self._stdio_params is None and self._sse_params is None:
                 raise ValueError("Either stdio_params or sse_params must be provided")
+            
             if self._stdio_params is not None:
+                log.debug(f"Connecting to MCP server '{self.name}' via stdio: {self._stdio_params.command} {' '.join(self._stdio_params.args)}")
                 self._transport = await self.exit_stack.enter_async_context(stdio_client(self._stdio_params))
             else:
+                log.debug(f"Connecting to MCP server '{self.name}' via SSE: {self._sse_params.url}")
                 self._transport = await self.exit_stack.enter_async_context(sse_client(url=self._sse_params.url, headers=self._sse_params.headers))
+            
             self._read_stream, self._write_stream = self._transport
             self._session = await self.exit_stack.enter_async_context(ClientSession(self._read_stream, self._write_stream, timedelta(seconds=MCP_TOOL_TIMEOUT)))
+            
+            log.debug(f"Initializing MCP session for server '{self.name}'...")
             await self._session.initialize()
+            
             if not self._tried_to_get_tool_list:
+                log.debug(f"Fetching tool list for MCP server '{self.name}'...")
                 await self._update_tool_list()
                 self._tried_to_get_tool_list = True
+                log.info(f"MCP server '{self.name}' connected successfully with {len(self._mcp_tools)} tools")
+            else:
+                log.info(f"MCP server '{self.name}' reconnected successfully")
+                
         except Exception as e:
-            log.error(f"Error connecting to MCP server '{self.name}': {e}")
+            error_msg = f"Failed to connect to MCP server '{self.name}'"
+            if self._stdio_params is not None:
+                error_msg += f" (stdio: {self._stdio_params.command} {' '.join(self._stdio_params.args)})"
+            else:
+                error_msg += f" (SSE: {self._sse_params.url})"
+            error_msg += f": {str(e)}"
+            
+            log.error(error_msg)
+            log.debug(f"Full connection error details for MCP server '{self.name}': {repr(e)}")
+            
             self._session = None
             self.exit_stack = None
             raise e
@@ -143,9 +179,14 @@ class MCPServerImpl(MCPServer):
         if self._session is None:
             return
 
-        await self.exit_stack.aclose()
-        self.exit_stack = None
-        self._session = None
+        try:
+            if self.exit_stack is not None:
+                await self.exit_stack.aclose()
+        except Exception as e:
+            log.debug(f"Error during disconnect of server '{self.name}': {repr(e)}")
+        finally:
+            self.exit_stack = None
+            self._session = None
 
     async def _update_tool_list(self):
         if self._session is None:
@@ -157,12 +198,24 @@ class MCPServerImpl(MCPServer):
     async def call_tool(self, tool_name: str, tool_args: dict):
         try:
             if self._session is None:
+                log.debug(f"Session not connected for server '{self.name}', connecting...")
                 await self.connect()
 
+            log.debug(f"Calling tool '{tool_name}' on server '{self.name}' with arguments: {tool_args}")
             result = await self._session.call_tool(tool_name, tool_args)
+            log.debug(f"Tool '{tool_name}' on server '{self.name}' completed successfully")
             return result
         except Exception as e:
-            log.error(f"Error calling tool '{tool_name}' on server '{self.name}': {e}")
+            error_msg = f"Error calling tool '{tool_name}' on server '{self.name}' with args {tool_args}: {str(e)}"
+            log.error(error_msg)
+            log.debug(f"Full error details for tool '{tool_name}' on server '{self.name}': {repr(e)}")
+            
+            # Check if it's a specific MCP error type and log additional context
+            if hasattr(e, 'error_code'):
+                log.error(f"MCP error code for tool '{tool_name}': {e.error_code}")
+            if hasattr(e, 'error_data'):
+                log.error(f"MCP error data for tool '{tool_name}': {e.error_data}")
+                
             return None
 
     # TODO: optimize this
@@ -222,23 +275,49 @@ class MCPChatParticipant(BaseChatParticipant):
     async def handle_chat_request(self, request: ChatRequest, response: ChatResponse, options: dict = {}) -> None:
         response.stream(ProgressData("Thinking..."))
 
+        # Ensure servers are connected but don't disconnect after each request
+        connected_servers = []
+        failed_servers = []
+        
         for server in self._servers:
-            await server.connect()
+            if server._session is None:
+                try:
+                    log.debug(f"Connecting to MCP server '{server.name}' for chat request")
+                    await server.connect()
+                    connected_servers.append(server.name)
+                except Exception as e:
+                    error_msg = f"Failed to connect to MCP server '{server.name}' for chat request: {str(e)}"
+                    log.error(error_msg)
+                    failed_servers.append(server.name)
+                    # Continue with other servers instead of failing completely
+            else:
+                connected_servers.append(server.name)
+
+        if failed_servers:
+            error_message = f"Warning: Failed to connect to MCP servers: {', '.join(failed_servers)}"
+            log.warning(error_message)
+            if connected_servers:
+                log.info(f"Continuing with connected servers: {', '.join(connected_servers)}")
+            else:
+                response.stream(MarkdownData(f"⚠️ **Error**: {error_message}"))
+                response.finish()
+                return
 
         if request.command == "info":
             for server in self._servers:
-                info_lines = []
-                info_lines.append(f"- **{server.name}** server tools:")
-                for tool in server.get_tools():
-                    info_lines.append(f"  - **{tool.name}**: {tool.description}\n")
-                response.stream(MarkdownData(f"\n".join(info_lines)))
+                if server._session is not None:  # Only show info for connected servers
+                    info_lines = []
+                    info_lines.append(f"- **{server.name}** server tools:")
+                    for tool in server.get_tools():
+                        info_lines.append(f"  - **{tool.name}**: {tool.description}\n")
+                    response.stream(MarkdownData(f"\n".join(info_lines)))
+
+            if failed_servers:
+                response.stream(MarkdownData(f"\n⚠️ **Unavailable servers**: {', '.join(failed_servers)}"))
 
             response.finish()
         else:
             await self.handle_chat_request_with_tools(request, response, options)
-
-        for server in self._servers:
-            await server.disconnect()
 
 class MCPManager:
     def __init__(self, mcp_config: dict):
@@ -331,12 +410,18 @@ class MCPManager:
         return self._mcp_participants
 
     async def init_tool_lists_async(self):
+        log.info(f"Initializing tool lists for {len(self._mcp_servers)} MCP servers...")
         for server in self._mcp_servers:
             try:
+                log.debug(f"Initializing tool list for MCP server '{server.name}'...")
                 await server.connect()
+                tool_count = len(server.get_tools())
+                log.info(f"MCP server '{server.name}' initialized with {tool_count} tools")
                 await server.disconnect()
             except Exception as e:
-                log.error(f"Error initializing tool list for server {server.name}: {e}")
+                log.error(f"Error initializing tool list for server '{server.name}': {str(e)}")
+                log.debug(f"Full initialization error for server '{server.name}': {repr(e)}")
+        log.info("MCP server initialization completed")
     
     def init_tool_lists(self):
         asyncio.run(self.init_tool_lists_async())
@@ -349,3 +434,11 @@ class MCPManager:
             if server.name == server_name:
                 return server
         return None
+    
+    async def cleanup(self):
+        """Cleanup method to properly disconnect all servers when shutting down"""
+        for server in self._mcp_servers:
+            try:
+                await server.disconnect()
+            except Exception as e:
+                log.debug(f"Error disconnecting server '{server.name}' during cleanup: {repr(e)}")
