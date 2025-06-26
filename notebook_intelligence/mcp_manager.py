@@ -98,6 +98,10 @@ class MCPTool(Tool):
             elif type(result) is dict:
                 log.debug(f"MCP tool '{self.name}' returned dict result: {result}")
                 return result
+            elif result is None:
+                error_msg = f"Tool '{self.name}' on server '{self._server.name}' returned None (likely a server-side error)"
+                log.error(error_msg)
+                return f"Error! {error_msg}"
             else:
                 error_msg = f"Invalid tool result type from '{self.name}' on server '{self._server.name}': {type(result)} - {result}"
                 log.error(error_msg)
@@ -105,6 +109,7 @@ class MCPTool(Tool):
         except Exception as e:
             error_msg = f"Exception while calling MCP tool '{self.name}' on server '{self._server.name}' with args {call_args}: {str(e)}"
             log.error(error_msg)
+            log.error(f"Exception type: {type(e).__name__}")
             log.debug(f"Full exception details for tool '{self.name}': {repr(e)}")
             return f"Error occurred while calling MCP tool: {str(e)}"
 
@@ -196,27 +201,65 @@ class MCPServerImpl(MCPServer):
         self._mcp_tools = response.tools
 
     async def call_tool(self, tool_name: str, tool_args: dict):
-        try:
-            if self._session is None:
-                log.debug(f"Session not connected for server '{self.name}', connecting...")
-                await self.connect()
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                if self._session is None:
+                    log.debug(f"Session not connected for server '{self.name}', connecting...")
+                    await self.connect()
 
-            log.debug(f"Calling tool '{tool_name}' on server '{self.name}' with arguments: {tool_args}")
-            result = await self._session.call_tool(tool_name, tool_args)
-            log.debug(f"Tool '{tool_name}' on server '{self.name}' completed successfully")
-            return result
-        except Exception as e:
-            error_msg = f"Error calling tool '{tool_name}' on server '{self.name}' with args {tool_args}: {str(e)}"
-            log.error(error_msg)
-            log.debug(f"Full error details for tool '{tool_name}' on server '{self.name}': {repr(e)}")
-            
-            # Check if it's a specific MCP error type and log additional context
-            if hasattr(e, 'error_code'):
-                log.error(f"MCP error code for tool '{tool_name}': {e.error_code}")
-            if hasattr(e, 'error_data'):
-                log.error(f"MCP error data for tool '{tool_name}': {e.error_data}")
+                log.info(f"🔧 Attempting to call tool '{tool_name}' on server '{self.name}' with arguments: {tool_args} (attempt {attempt + 1}/{max_retries})")
                 
-            return None
+                # Check if the session is still valid
+                if self._session is None:
+                    raise Exception(f"Failed to establish session with server '{self.name}'")
+                
+                # Verify the tool exists in our tool list
+                available_tools = [tool.name for tool in self._mcp_tools]
+                if tool_name not in available_tools:
+                    raise Exception(f"Tool '{tool_name}' not found in server '{self.name}'. Available tools: {available_tools}")
+                
+                log.debug(f"Session state for server '{self.name}': connected={self._session is not None}")
+                result = await self._session.call_tool(tool_name, tool_args)
+                log.info(f"✅ Tool '{tool_name}' on server '{self.name}' completed successfully")
+                return result
+                
+            except Exception as e:
+                error_msg = f"Error calling tool '{tool_name}' on server '{self.name}' with args {tool_args}"
+                log.error(f"❌ {error_msg}: {str(e)}")
+                log.error(f"Exception type: {type(e).__name__}")
+                log.error(f"Full error details for tool '{tool_name}' on server '{self.name}': {repr(e)}")
+                
+                # Check if it's a connection-related error that we can retry
+                is_connection_error = (
+                    type(e).__name__ in ['ClosedResourceError', 'ConnectionError', 'BrokenPipeError', 'EOFError'] or
+                    'closed' in str(e).lower() or
+                    'connection' in str(e).lower()
+                )
+                
+                if is_connection_error and attempt < max_retries - 1:
+                    log.warning(f"🔄 Connection error detected for server '{self.name}', attempting to reconnect (attempt {attempt + 1}/{max_retries})")
+                    # Force disconnect and reconnect
+                    await self.disconnect()
+                    self._session = None
+                    continue
+                
+                # Check if it's a specific MCP error type and log additional context
+                if hasattr(e, 'error_code'):
+                    log.error(f"MCP error code for tool '{tool_name}': {e.error_code}")
+                if hasattr(e, 'error_data'):
+                    log.error(f"MCP error data for tool '{tool_name}': {e.error_data}")
+                
+                # Log connection state
+                log.error(f"Connection state for server '{self.name}': session_exists={self._session is not None}")
+                if self._session is not None:
+                    log.error(f"Session details: {type(self._session)}")
+                
+                # Re-raise the exception instead of returning None to preserve the error information
+                raise e
+        
+        # This should never be reached, but just in case
+        raise Exception(f"Failed to call tool '{tool_name}' after {max_retries} attempts")
 
     # TODO: optimize this
     def get_tools(self) -> list[Tool]:
