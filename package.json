@@ -2,6 +2,7 @@
     "name": "@notebook-intelligence/notebook-intelligence",
     "version": "2.2.4",
     "description": "AI coding assistant for JupyterLab",
+    "packageManager": "yarn@1.22.0",
     "keywords": [
         "AI",
         "notebook",

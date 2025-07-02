@@ -116,36 +116,67 @@ class MCPServerImpl(MCPServer):
         return self._name
     
     async def connect(self):
-        if self._session is not None:
-            return
-        self.exit_stack = AsyncExitStack()
-
         try:
-            if self._stdio_params is None and self._sse_params is None:
-                raise ValueError("Either stdio_params or sse_params must be provided")
+            log.info(f"Connecting to MCP server '{self.name}'...")
+            if self._session is not None:
+                log.info(f"Session already exists for server '{self.name}', skipping connection")
+                return
+
+            log.info(f"Creating new session for server '{self.name}'...")
+            self.exit_stack = AsyncExitStack()
+            
             if self._stdio_params is not None:
+                log.info(f"Using STDIO transport for server '{self.name}': {self._stdio_params.command} {self._stdio_params.args}")
                 self._transport = await self.exit_stack.enter_async_context(stdio_client(self._stdio_params))
+            elif self._sse_params is not None:
+                log.info(f"Using SSE transport for server '{self.name}': {self._sse_params.url}")
+                self._transport = await self.exit_stack.enter_async_context(sse_client(self._sse_params.url, self._sse_params.headers))
             else:
-                self._transport = await self.exit_stack.enter_async_context(sse_client(url=self._sse_params.url, headers=self._sse_params.headers))
+                raise Exception("No transport parameters provided")
+
             self._read_stream, self._write_stream = self._transport
+            log.info(f"Transport established for server '{self.name}', creating session...")
             self._session = await self.exit_stack.enter_async_context(ClientSession(self._read_stream, self._write_stream, timedelta(seconds=MCP_TOOL_TIMEOUT)))
+            
+            log.info(f"Initializing session for server '{self.name}'...")
             await self._session.initialize()
+            
             if not self._tried_to_get_tool_list:
+                log.info(f"Updating tool list for server '{self.name}'...")
                 await self._update_tool_list()
                 self._tried_to_get_tool_list = True
+                log.info(f"Tool list updated for server '{self.name}', found {len(self._mcp_tools)} tools")
+            
+            log.info(f"Successfully connected to MCP server '{self.name}'")
         except Exception as e:
             log.error(f"Error connecting to MCP server '{self.name}': {e}")
+            import traceback
+            log.error(f"Connection error traceback: {traceback.format_exc()}")
             self._session = None
             self.exit_stack = None
             raise e
 
     async def disconnect(self):
-        if self._session is None:
-            return
+        try:
+            log.info(f"Disconnecting from MCP server '{self.name}'...")
+            if self._session is None:
+                log.info(f"Session is None for server '{self.name}', nothing to disconnect")
+                return
 
-        await self.exit_stack.aclose()
-        self.exit_stack = None
-        self._session = None
+            log.info(f"Closing exit stack for server '{self.name}'...")
+            await self.exit_stack.aclose()
+            log.info(f"Exit stack closed for server '{self.name}'")
+            
+            self.exit_stack = None
+            self._session = None
+            log.info(f"Successfully disconnected from MCP server '{self.name}'")
+        except Exception as e:
+            log.error(f"Error disconnecting from MCP server '{self.name}': {e}")
+            import traceback
+            log.error(f"Disconnect error traceback: {traceback.format_exc()}")
+            # Force cleanup even if there's an error
+            self.exit_stack = None
+            self._session = None
 
     async def _update_tool_list(self):
         if self._session is None:
@@ -155,15 +186,55 @@ class MCPServerImpl(MCPServer):
         self._mcp_tools = response.tools
 
     async def call_tool(self, tool_name: str, tool_args: dict):
-        try:
-            if self._session is None:
-                await self.connect()
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                log.info(f"Attempting to call tool '{tool_name}' on server '{self.name}' with args: {tool_args} (attempt {attempt + 1}/{max_retries})")
+                if self._session is None:
+                    log.info(f"Session is None for server '{self.name}', connecting...")
+                    await self.connect()
 
-            result = await self._session.call_tool(tool_name, tool_args)
-            return result
-        except Exception as e:
-            log.error(f"Error calling tool '{tool_name}' on server '{self.name}': {e}")
-            return None
+                log.info(f"Calling tool '{tool_name}' on server '{self.name}'...")
+                result = await self._session.call_tool(tool_name, tool_args)
+                log.info(f"Tool '{tool_name}' on server '{self.name}' returned: {type(result)} with length {len(str(result)) if result else 0}")
+                return result
+            except Exception as e:
+                error_type = type(e).__name__
+                log.error(f"Error calling tool '{tool_name}' on server '{self.name}': {e}")
+                log.error(f"Error type: {error_type}")
+                log.error(f"Tool args were: {tool_args}")
+                
+                # Handle ClosedResourceError with automatic reconnection
+                if error_type == "ClosedResourceError" and attempt < max_retries - 1:
+                    log.warning(f"ClosedResourceError detected for server '{self.name}', attempting reconnection...")
+                    try:
+                        # Force disconnect and reconnect
+                        await self.force_disconnect()
+                        await self.connect()
+                        log.info(f"Successfully reconnected to server '{self.name}'")
+                        continue  # Retry the tool call
+                    except Exception as reconnect_error:
+                        log.error(f"Failed to reconnect to server '{self.name}': {reconnect_error}")
+                
+                # Log full traceback on final attempt or non-recoverable errors
+                if attempt == max_retries - 1:
+                    import traceback
+                    log.error(f"Final attempt failed. Full traceback: {traceback.format_exc()}")
+                
+                # If this was the last attempt, return None
+                if attempt == max_retries - 1:
+                    return None
+        
+        return None
+
+    async def force_disconnect(self):
+        """Forcefully disconnect without trying to close already-closed resources"""
+        log.info(f"Force disconnecting from MCP server '{self.name}' (bypassing close operations)...")
+        # Don't try to close the exit_stack since resources are already closed
+        # Just reset the state
+        self.exit_stack = None
+        self._session = None
+        log.info(f"Force disconnected from MCP server '{self.name}'")
 
     # TODO: optimize this
     def get_tools(self) -> list[Tool]:
@@ -220,12 +291,29 @@ class MCPChatParticipant(BaseChatParticipant):
         return self._servers
     
     async def handle_chat_request(self, request: ChatRequest, response: ChatResponse, options: dict = {}) -> None:
+        log.info(f"MCP Chat Participant '{self.name}' handling chat request: {request.command}")
         response.stream(ProgressData("Thinking..."))
 
+        # Force disconnect all servers to ensure fresh connections
+        log.info(f"Ensuring fresh connections by disconnecting {len(self._servers)} MCP servers...")
         for server in self._servers:
-            await server.connect()
+            try:
+                await server.force_disconnect()
+                log.info(f"Force disconnected server '{server.name}' for fresh connection")
+            except Exception as e:
+                log.error(f"Error during force disconnect of server '{server.name}': {e}")
+
+        # Connect to all servers
+        log.info(f"Connecting to {len(self._servers)} MCP servers...")
+        for server in self._servers:
+            try:
+                await server.connect()
+                log.info(f"Successfully connected to server '{server.name}'")
+            except Exception as e:
+                log.error(f"Failed to connect to server '{server.name}': {e}")
 
         if request.command == "info":
+            log.info(f"Processing info command for {len(self._servers)} servers")
             for server in self._servers:
                 info_lines = []
                 info_lines.append(f"- **{server.name}** server tools:")
@@ -235,10 +323,19 @@ class MCPChatParticipant(BaseChatParticipant):
 
             response.finish()
         else:
+            log.info(f"Processing chat request with tools for command: {request.command}")
             await self.handle_chat_request_with_tools(request, response, options)
 
+        # Disconnect from all servers
+        log.info(f"Disconnecting from {len(self._servers)} MCP servers...")
         for server in self._servers:
-            await server.disconnect()
+            try:
+                await server.disconnect()
+                log.info(f"Successfully disconnected from server '{server.name}'")
+            except Exception as e:
+                log.error(f"Failed to disconnect from server '{server.name}': {e}")
+        
+        log.info(f"MCP Chat Participant '{self.name}' finished handling chat request")
 
 class MCPManager:
     def __init__(self, mcp_config: dict):
