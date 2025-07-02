@@ -279,7 +279,7 @@ class AIServiceManager(Host):
 
     def get_chat_participant(self, prompt: str) -> ChatParticipant:
         (participant_id, command, input) = AIServiceManager.parse_prompt(prompt)
-        return self.chat_participants.get(participant_id, DEFAULT_CHAT_PARTICIPANT_ID)
+        return self.chat_participants.get(participant_id, self.chat_participants[DEFAULT_CHAT_PARTICIPANT_ID])
 
     async def handle_chat_request(self, request: ChatRequest, response: ChatResponse, options: dict = {}) -> None:
         if self.chat_model is None:
@@ -289,7 +289,7 @@ class AIServiceManager(Host):
             return
         request.host = self
         (participant_id, command, prompt) = AIServiceManager.parse_prompt(request.prompt)
-        participant = self.chat_participants.get(participant_id, DEFAULT_CHAT_PARTICIPANT_ID)
+        participant = self.chat_participants.get(participant_id, self.chat_participants[DEFAULT_CHAT_PARTICIPANT_ID])
         request.command = command
         request.prompt = prompt
         response.participant_id  = participant_id
