@@ -1,0 +1,13 @@
+{
+    "chat_model": {
+        "provider": "github-copilot",
+        "model": "gpt-4",
+        "properties": []
+    },
+    "inline_completion_model": {
+        "provider": "github-copilot",
+        "model": "copilot-code",
+        "properties": []
+    },
+    "store_github_access_token": true
+} 

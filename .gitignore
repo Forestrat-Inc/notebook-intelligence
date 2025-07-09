@@ -124,3 +124,5 @@ dmypy.json
 _site/
 Gemfile.lock
 
+*.jupyter_ystore.db
+.jupyter_ystore.db
