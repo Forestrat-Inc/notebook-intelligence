@@ -141,6 +141,26 @@ This will automatically create a new chat participant in NBI and you can access 
 
 By default, each tool call to MCP servers will require approval. If you would like to auto approve tools, you can do so by using the `"alwaysAllow": []` configuration key in the nbi-config.json. Simply list the names of tools.
 
+To allow **all** tools for a server without approval, use a wildcard `*`:
+
+```json
+"mcpServers": {
+    "filesystem": {
+        "command": "npx",
+        "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/Users/mbektas/mcp-test"
+        ],
+        "alwaysAllow": ["*"]
+    },
+}
+```
+
+You can also use the legacy key `autoApprove` instead of `alwaysAllow` for backward compatibility.
+
+For example, to allow only specific tools:
+
 ```json
 "mcpServers": {
     "filesystem": {
