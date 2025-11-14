@@ -36,7 +36,7 @@ import { IDefaultFileBrowser } from '@jupyterlab/filebrowser';
 
 import { ContentsManager, KernelSpecManager } from '@jupyterlab/services';
 
-import { LabIcon } from '@jupyterlab/ui-components';
+import { LabIcon, CommandToolbarButton } from '@jupyterlab/ui-components';
 
 import { Menu, Panel, Widget } from '@lumino/widgets';
 import { CommandRegistry } from '@lumino/commands';
@@ -48,7 +48,8 @@ import {
   GitHubCopilotLoginDialogBody,
   GitHubCopilotStatusBarItem,
   InlinePromptWidget,
-  RunChatCompletionType
+  RunChatCompletionType,
+  ScheduleDialogBody
 } from './chat-sidebar';
 import { NBIAPI, GitHubCopilotLoginStatus } from './api';
 import {
@@ -130,6 +131,7 @@ namespace CommandIDs {
     'notebook-intelligence:open-mcp-config-editor';
   export const showFormInputDialog =
     'notebook-intelligence:show-form-input-dialog';
+  export const scheduleNotebook = 'notebook-intelligence:schedule-notebook';
 }
 
 const DOCUMENT_WATCH_INTERVAL = 1000;
@@ -1334,6 +1336,61 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
       }
     });
 
+    // Schedule Notebook Command (renamed to Publish)
+    app.commands.addCommand(CommandIDs.scheduleNotebook, {
+      label: 'Publish',
+      execute: () => {
+        const currentWidget = app.shell.currentWidget;
+        if (currentWidget instanceof NotebookPanel) {
+          const notebookPath = currentWidget.sessionContext.path;
+          console.log('Scheduling notebook:', notebookPath);
+          
+          let scheduleDialog: Dialog<unknown> | null = null;
+          const dialogBody = new ScheduleDialogBody({
+            notebookPath: notebookPath,
+            onCancel: () => {
+              if (scheduleDialog) {
+                scheduleDialog.dispose();
+              }
+            },
+            onCreate: (scheduleData: any) => {
+              console.log('Schedule data:', scheduleData);
+              if (scheduleDialog) {
+                scheduleDialog.dispose();
+              }
+              app.commands.execute('apputils:notify', {
+                message: `Schedule created for: ${scheduleData.jobName}`,
+                type: 'info',
+                options: { autoClose: 3000 }
+              });
+            }
+          });
+          
+          scheduleDialog = new Dialog({
+            title: '',
+            body: dialogBody,
+            buttons: [],
+            hasClose: true
+          });
+          
+          scheduleDialog.launch();
+        } else {
+          app.commands.execute('apputils:notify', {
+            message: 'Please open a notebook to schedule',
+            type: 'warning',
+            options: { autoClose: true }
+          });
+        }
+      },
+      isEnabled: () => {
+        const currentWidget = app.shell.currentWidget;
+        const enabled = currentWidget instanceof NotebookPanel;
+        console.log('Publish command enabled check:', enabled, currentWidget?.constructor?.name);
+        return enabled;
+      },
+      isVisible: () => true
+    });
+
     palette.addItem({
       command: CommandIDs.openConfigurationDialog,
       category: 'Notebook Intelligence'
@@ -1344,6 +1401,187 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
         command: CommandIDs.openConfigurationDialog
       }
     ]);
+
+    // Add Publish button programmatically to notebook toolbars
+    const scheduleButtonId = 'notebook-intelligence:schedule-notebook';
+    const addedNotebooks = new WeakSet<NotebookPanel>();
+    
+    const addScheduleButtonToNotebook = (notebook: NotebookPanel) => {
+      // Remove the WeakSet check to allow re-adding if needed
+      try {
+        const toolbar = notebook.toolbar;
+        
+        if (!toolbar) {
+          console.warn('Toolbar not available for notebook:', notebook.sessionContext.path);
+          return;
+        }
+        
+        // Check if button already exists
+        let exists = false;
+        try {
+          const names = Array.from(toolbar.names());
+          exists = names.includes(scheduleButtonId);
+          if (exists) {
+            console.log('Publish button already exists in toolbar');
+            return;
+          }
+        } catch (e) {
+          console.warn('Error checking toolbar names:', e);
+        }
+        
+        // Create and add the button
+        const scheduleButton = new CommandToolbarButton({
+          commands: app.commands,
+          id: CommandIDs.scheduleNotebook,
+          label: 'Publish'
+        });
+        
+        // Ensure button is enabled and clickable
+        scheduleButton.node.setAttribute('data-command', CommandIDs.scheduleNotebook);
+        scheduleButton.node.style.pointerEvents = 'auto';
+        scheduleButton.node.style.cursor = 'pointer';
+        
+        toolbar.insertItem(100, scheduleButtonId, scheduleButton);
+        addedNotebooks.add(notebook);
+        
+        // Force update button state after a short delay
+        setTimeout(() => {
+          const buttonElement = scheduleButton.node;
+          if (buttonElement) {
+            buttonElement.classList.remove('jp-mod-disabled');
+            buttonElement.setAttribute('aria-disabled', 'false');
+            console.log('✅ Publish button added and enabled:', notebook.sessionContext.path);
+          }
+        }, 100);
+      } catch (error) {
+        console.error('❌ Error adding Publish button:', error);
+      }
+    };
+
+    // Function to check and add button to current notebook
+    const checkAndAddButton = () => {
+      const currentWidget = app.shell.currentWidget;
+      if (currentWidget instanceof NotebookPanel) {
+        // Use longer timeout to ensure toolbar is ready
+        setTimeout(() => {
+          addScheduleButtonToNotebook(currentWidget);
+        }, 1000);
+      }
+    };
+
+    // Add button to existing notebooks with multiple attempts
+    const addButtonToNotebooks = () => {
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      const tryAdd = () => {
+        attempts++;
+        let found = false;
+        
+        for (const widget of app.shell.widgets('main')) {
+          if (widget instanceof NotebookPanel) {
+            found = true;
+            addScheduleButtonToNotebook(widget);
+          }
+        }
+        
+        checkAndAddButton();
+        
+        // Retry if no notebooks found and we haven't exceeded max attempts
+        if (!found && attempts < maxAttempts) {
+          setTimeout(tryAdd, 1000);
+        }
+      };
+      
+      tryAdd();
+    };
+
+    // Initial attempt
+    setTimeout(addButtonToNotebooks, 500);
+
+    // Listen for new notebooks being opened or activated
+    app.shell.currentChanged.connect(() => {
+      checkAndAddButton();
+    });
+    
+    // Also listen for when notebooks are fully loaded
+    app.restored.then(() => {
+      setTimeout(addButtonToNotebooks, 1000);
+    });
+
+    // Add highlighting for cells with api-send tag
+    const highlightApiSendCells = (notebook: NotebookPanel) => {
+      const notebookWidget = notebook.content;
+      const cells = notebookWidget.widgets;
+      
+      cells.forEach((cell) => {
+        const cellModel = cell.model.sharedModel;
+        const metadata = cellModel.getMetadata();
+        const tags = (metadata.tags as string[]) || [];
+        
+        if (tags.includes('api-send')) {
+          cell.node.setAttribute('data-tag-name', 'api-send');
+          cell.node.classList.add('api-send-tagged');
+        } else {
+          cell.node.removeAttribute('data-tag-name');
+          cell.node.classList.remove('api-send-tagged');
+        }
+      });
+    };
+
+    // Watch for cell changes and tag updates
+    const setupCellTagWatcher = (notebook: NotebookPanel) => {
+      const notebookWidget = notebook.content;
+      
+      // Initial highlight
+      highlightApiSendCells(notebook);
+      
+      // Watch for cell changes
+      notebookWidget.model.cells.changed.connect(() => {
+        highlightApiSendCells(notebook);
+      });
+      
+      // Watch for metadata changes (tag updates) on all cells
+      const cellModels = notebookWidget.model.cells;
+      for (let i = 0; i < cellModels.length; i++) {
+        const cellModel = cellModels.get(i);
+        const sharedModel = cellModel.sharedModel;
+        sharedModel.changed.connect(() => {
+          highlightApiSendCells(notebook);
+        });
+      }
+      
+      // Also watch when new cells are added
+      notebookWidget.model.cells.changed.connect((sender, args) => {
+        if (args.type === 'add') {
+          args.newValues.forEach((cellModel) => {
+            const sharedModel = cellModel.sharedModel;
+            sharedModel.changed.connect(() => {
+              highlightApiSendCells(notebook);
+            });
+          });
+        }
+      });
+    };
+
+    // Setup watchers for existing notebooks
+    setTimeout(() => {
+      for (const widget of app.shell.widgets('main')) {
+        if (widget instanceof NotebookPanel) {
+          setupCellTagWatcher(widget);
+        }
+      }
+    }, 500);
+
+    // Setup watcher for new notebooks
+    app.shell.currentChanged.connect(() => {
+      const currentWidget = app.shell.currentWidget;
+      if (currentWidget instanceof NotebookPanel) {
+        setTimeout(() => {
+          setupCellTagWatcher(currentWidget);
+        }, 200);
+      }
+    });
 
     const getPrefixAndSuffixForActiveCell = (): {
       prefix: string;

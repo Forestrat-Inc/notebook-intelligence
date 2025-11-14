@@ -5,6 +5,14 @@
   "properties": {},
   "additionalProperties": false,
   "jupyter.lab.toolbars": {
+    "Notebook": [
+      {
+        "name": "notebook-intelligence:schedule-notebook",
+        "command": "notebook-intelligence:schedule-notebook",
+        "caption": "Publish",
+        "rank": 100
+      }
+    ],
     "Cell": [
       {
         "name": "notebook-intelligence:editor-generate-code",

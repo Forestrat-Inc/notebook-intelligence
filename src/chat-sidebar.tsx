@@ -2607,3 +2607,238 @@ function FormInputDialogBodyComponent(props: any) {
     </div>
   );
 }
+
+export class ScheduleDialogBody extends ReactWidget {
+  constructor(options: { notebookPath: string; onCancel: () => void; onCreate: (scheduleData: any) => void }) {
+    super();
+    this._notebookPath = options.notebookPath || '';
+    this._onCancel = options.onCancel || (() => {});
+    this._onCreate = options.onCreate || (() => {});
+  }
+
+  render(): JSX.Element {
+    return (
+      <ScheduleDialogBodyComponent
+        notebookPath={this._notebookPath}
+        onCancel={this._onCancel}
+        onCreate={this._onCreate}
+      />
+    );
+  }
+
+  private _notebookPath: string;
+  private _onCancel: () => void;
+  private _onCreate: (scheduleData: any) => void;
+}
+
+function ScheduleDialogBodyComponent(props: any) {
+  const [jobName, setJobName] = useState(() => {
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/T/, ' ').substring(0, 19);
+    return `Untitled Notebook ${timestamp}`;
+  });
+  const [scheduleMode, setScheduleMode] = useState<'simple' | 'advanced'>('simple');
+  const [scheduleInterval, setScheduleInterval] = useState('1');
+  const [scheduleUnit, setScheduleUnit] = useState('Day');
+  const [cronExpression, setCronExpression] = useState('0 0 * * *'); // Default: daily at midnight
+  const [computeType, setComputeType] = useState('Serverless');
+  const [computeScaling, setComputeScaling] = useState('Autoscaling');
+  const [performanceOptimized, setPerformanceOptimized] = useState(true);
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
+
+  const handleCreate = () => {
+    props.onCreate({
+      jobName,
+      scheduleMode,
+      schedule: scheduleMode === 'simple' 
+        ? {
+            interval: scheduleInterval,
+            unit: scheduleUnit
+          }
+        : {
+            cron: cronExpression
+          },
+      compute: {
+        type: computeType,
+        scaling: computeScaling
+      },
+      performanceOptimized,
+      notebookPath: props.notebookPath
+    });
+  };
+
+  return (
+    <div className="schedule-dialog-body">
+      <div className="schedule-dialog-header">
+        <h2>New schedule</h2>
+      </div>
+      
+      <div className="schedule-dialog-content">
+        {/* Job Name */}
+        <div className="schedule-dialog-field">
+          <label className="schedule-dialog-label">
+            Job name<span className="required">*</span>
+          </label>
+          <input
+            type="text"
+            className="schedule-dialog-input jp-mod-styled"
+            value={jobName}
+            onChange={(e) => setJobName(e.target.value)}
+            placeholder="Enter job name"
+          />
+        </div>
+
+        {/* Schedule Mode */}
+        <div className="schedule-dialog-field">
+          <div className="schedule-mode-buttons">
+            <button
+              className={`schedule-mode-button ${scheduleMode === 'simple' ? 'active' : ''}`}
+              onClick={() => setScheduleMode('simple')}
+            >
+              Simple
+            </button>
+            <button
+              className={`schedule-mode-button ${scheduleMode === 'advanced' ? 'active' : ''}`}
+              onClick={() => setScheduleMode('advanced')}
+            >
+              Advanced
+            </button>
+          </div>
+        </div>
+
+        {/* Schedule Configuration */}
+        <div className="schedule-dialog-field">
+          <label className="schedule-dialog-label">Schedule</label>
+          {scheduleMode === 'simple' ? (
+            <div className="schedule-interval-container">
+              <span className="schedule-interval-label">Every</span>
+              <select
+                className="schedule-dialog-select jp-mod-styled"
+                value={scheduleInterval}
+                onChange={(e) => setScheduleInterval(e.target.value)}
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].map(n => (
+                  <option key={n} value={n.toString()}>{n}</option>
+                ))}
+              </select>
+              <select
+                className="schedule-dialog-select jp-mod-styled"
+                value={scheduleUnit}
+                onChange={(e) => setScheduleUnit(e.target.value)}
+              >
+                <option value="Minute">Minute</option>
+                <option value="Hour">Hour</option>
+                <option value="Day">Day</option>
+                <option value="Week">Week</option>
+                <option value="Month">Month</option>
+              </select>
+            </div>
+          ) : (
+            <div className="cron-expression-container">
+              <input
+                type="text"
+                className="schedule-dialog-input jp-mod-styled cron-expression-input"
+                value={cronExpression}
+                onChange={(e) => setCronExpression(e.target.value)}
+                placeholder="0 0 * * *"
+              />
+              <div className="cron-expression-help">
+                <span className="cron-help-text">
+                  Cron format: minute hour day month weekday
+                </span>
+                <div className="cron-examples">
+                  <div className="cron-example">
+                    <code>0 0 * * *</code> - Daily at midnight
+                  </div>
+                  <div className="cron-example">
+                    <code>0 */6 * * *</code> - Every 6 hours
+                  </div>
+                  <div className="cron-example">
+                    <code>0 9 * * 1-5</code> - Weekdays at 9 AM
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Compute Configuration */}
+        <div className="schedule-dialog-field">
+          <label className="schedule-dialog-label">
+            Compute<span className="required">*</span>
+            <span className="info-icon" title="Compute configuration information">ⓘ</span>
+          </label>
+          <div className="compute-select-container">
+            <select
+              className="schedule-dialog-select jp-mod-styled compute-select"
+              value={`${computeType} - ${computeScaling}`}
+              onChange={(e) => {
+                const [type, scaling] = e.target.value.split(' - ');
+                setComputeType(type);
+                setComputeScaling(scaling);
+              }}
+            >
+              <option value="Serverless - Autoscaling">Serverless - Autoscaling</option>
+              <option value="Serverless - Fixed">Serverless - Fixed</option>
+              <option value="Dedicated - Autoscaling">Dedicated - Autoscaling</option>
+              <option value="Dedicated - Fixed">Dedicated - Fixed</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Performance Optimization */}
+        <div className="schedule-dialog-field">
+          <label className="schedule-dialog-label">
+            Performance optimization
+            <span className="info-icon" title="Performance optimization information">ⓘ</span>
+          </label>
+          <div className="checkbox-container">
+            <input
+              type="checkbox"
+              id="performance-optimized"
+              className="schedule-dialog-checkbox"
+              checked={performanceOptimized}
+              onChange={(e) => setPerformanceOptimized(e.target.checked)}
+            />
+            <label htmlFor="performance-optimized" className="checkbox-label">
+              Performance optimized
+            </label>
+          </div>
+        </div>
+
+        {/* More Options */}
+        <div className="schedule-dialog-field">
+          <button
+            className="more-options-toggle"
+            onClick={() => setShowMoreOptions(!showMoreOptions)}
+          >
+            <span>More options</span>
+            <span className={`chevron ${showMoreOptions ? 'open' : ''}`}>▼</span>
+          </button>
+          {showMoreOptions && (
+            <div className="more-options-content">
+              {/* Additional options can be added here */}
+              <p>Additional configuration options coming soon...</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Action Buttons */}
+      <div className="schedule-dialog-footer">
+        <button
+          className="jp-Dialog-button jp-mod-reject jp-mod-styled"
+          onClick={props.onCancel}
+        >
+          <div className="jp-Dialog-buttonLabel">Cancel</div>
+        </button>
+        <button
+          className="jp-Dialog-button jp-mod-accept jp-mod-styled"
+          onClick={handleCreate}
+        >
+          <div className="jp-Dialog-buttonLabel">Create</div>
+        </button>
+      </div>
+    </div>
+  );
+}

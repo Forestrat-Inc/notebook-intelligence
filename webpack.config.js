@@ -10,5 +10,10 @@ module.exports = {
   ],
   experiments: {
     syncWebAssembly: true
+  },
+  resolve: {
+    fallback: {
+      'regexp-match-indices': false
+    }
   }
 };
